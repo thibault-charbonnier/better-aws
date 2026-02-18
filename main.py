@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 logger.info("Starting AWS operations...")
 
-aws = AWS("s3admin", logger=logger, verbose=False)
+aws = AWS("s3admin", logger=logger, verbose=True)
 aws.identity(print_info=True)
 
 aws.s3.config(bucket="thib-quant")

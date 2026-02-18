@@ -3,6 +3,8 @@ from typing import Optional, Any, Dict
 from botocore.config import Config
 import logging
 import boto3
+import botocore.session
+from dotenv import dotenv_values
 from .services.s3 import S3
 import sys
 
@@ -16,7 +18,15 @@ class AWS:
                  verbose: bool = False,
                  retries: int = 10,
                  connect_timeout_s: int = 5,
-                 read_timeout_s: int = 60):
+                 read_timeout_s: int = 60,
+                 *,
+                 credentials_file: Optional[str] = None,
+                 config_file: Optional[str] = None,
+                 env_file: Optional[str] = None,
+                 aws_access_key_id: Optional[str] = None,
+                 aws_secret_access_key: Optional[str] = None,
+                 aws_session_token: Optional[str] = None
+                 ):
         
         self.profile = profile
         self.region = region
@@ -25,6 +35,13 @@ class AWS:
         self.connect_timeout_s = connect_timeout_s
         self.read_timeout_s = read_timeout_s
         
+        self.credentials_file = credentials_file
+        self.config_file = config_file
+        self.env_file = env_file
+        self.aws_access_key_id = aws_access_key_id
+        self.aws_secret_access_key = aws_secret_access_key
+        self.aws_session_token = aws_session_token
+
         self._config_logger(logger)
 
         self._session_cache: Optional[boto3.Session] = None
@@ -72,17 +89,87 @@ class AWS:
                 h.setFormatter(logging.Formatter("%(message)s"))
                 self.logger.addHandler(h)
 
+    def _read_env_file(self) -> Dict[str, str]:
+        """
+        Env file reader.
+
+        Returns
+        -------
+        dict
+            A dictionary containing the key-value pairs from the env file.
+        """
+        values = dotenv_values(self.env_file)
+        return {k: v for k, v in values.items() if k and v is not None}
+    
     def _session(self) -> boto3.Session:
         """
         Get a boto3 Session object for AWS interactions.
+
+        The session is created based on the following priority:
+            1) Static credentials provided directly to the AWS constructor.
+            2) An env file containing AWS credentials and region.
+            3) Custom credentials or/and config files specified by the user.
+            4) Default boto3 session using the specified profile and region
+               See : https://docs.aws.amazon.com/boto3/latest/guide/credentials.html
 
         Returns
         -------
         boto3.Session
             A boto3 Session configured with the specified profile and region.
         """
-        if self._session_cache is None:
-            self._session_cache = boto3.Session(profile_name=self.profile, region_name=self.region)
+        
+        if self._session_cache is not None:
+            return self._session_cache
+
+        # 1) Static credentials
+        if self.aws_access_key_id and self.aws_secret_access_key:
+            self._session_cache = boto3.Session(
+                aws_access_key_id=self.aws_access_key_id,
+                aws_secret_access_key=self.aws_secret_access_key,
+                aws_session_token=self.aws_session_token,
+                region_name=self.region,
+            )
+            return self._session_cache
+
+        # 2) Env file
+        if self.env_file:
+            env = self._read_env_file()
+            ak = env.get("AWS_ACCESS_KEY_ID")
+            sk = env.get("AWS_SECRET_ACCESS_KEY")
+            tok = env.get("AWS_SESSION_TOKEN")
+            reg = env.get("AWS_REGION") or env.get("AWS_DEFAULT_REGION") or self.region
+
+            if not ak or not sk:
+                raise ValueError(f"env_file provided but missing AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY: {self.env_file}")
+
+            self._session_cache = boto3.Session(
+                aws_access_key_id=ak,
+                aws_secret_access_key=sk,
+                aws_session_token=tok,
+                region_name=reg,
+            )
+            return self._session_cache
+        
+        # 3) Custom config files
+        if self.credentials_file or self.config_file:
+            bc = botocore.session.get_session()
+            if self.credentials_file:
+                bc.set_config_variable("credentials_file", self.credentials_file)
+            if self.config_file:
+                bc.set_config_variable("config_file", self.config_file)
+
+            self._session_cache = boto3.Session(
+                botocore_session=bc,
+                profile_name=self.profile,
+                region_name=self.region,
+            )
+            return self._session_cache
+
+        # 4) Default boto3 session
+        self._session_cache = boto3.Session(
+            profile_name=self.profile,
+            region_name=self.region,
+        )
         return self._session_cache
 
     def _config(self) -> Config:
@@ -103,6 +190,12 @@ class AWS:
     # --------------------------------------------------------
     # |                   Exposed Methods                    |
     # --------------------------------------------------------
+
+    def reset_session(self) -> None:
+        """
+        Reset the cached boto3 session.
+        """
+        self._session_cache = None
 
     def info(self, msg: str, *args: Any) -> None:
         """
