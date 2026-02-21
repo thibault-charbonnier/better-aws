@@ -1,9 +1,7 @@
 # better-aws
 
-[![Python](https://img.shields.io/badge/python-3.9%2B-blue.svg)](#)
+[![Python](https://img.shields.io/badge/python-3.11%2B-blue.svg)](#)
 [![PyPI](https://img.shields.io/pypi/v/better-aws.svg)](https://pypi.org/project/better-aws/)
-[![Downloads](https://img.shields.io/pypi/dm/better-aws.svg)](https://pypi.org/project/better-aws/)
-[![License](https://img.shields.io/pypi/l/better-aws.svg)](#license)
 
 A minimal, production-minded wrapper around `boto3` focused on **S3 and tabular data (CSV/Parquet/Excel)**.
 

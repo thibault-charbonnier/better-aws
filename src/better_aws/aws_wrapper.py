@@ -1,3 +1,4 @@
+from __future__ import annotations
 import sys
 import boto3
 import logging
@@ -5,7 +6,6 @@ import botocore.session
 from .services import S3
 from dotenv import dotenv_values
 from botocore.config import Config
-from __future__ import annotations
 from typing import Optional, Any, Dict
 
 
