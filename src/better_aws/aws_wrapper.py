@@ -5,7 +5,7 @@ import logging
 import boto3
 import botocore.session
 from dotenv import dotenv_values
-from .services.s3 import S3
+from .services import S3
 import sys
 
 

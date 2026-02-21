@@ -1,9 +1,12 @@
 [project]
 name = "better-aws"
 version = "0.1.0"
-description = "Add your description here"
+description = "Minimal AWS boto3 wrapper"
 readme = "README.md"
-requires-python = ">=3.12"
+authors = [
+    { name = "Thibault Charbonnier", email = "thibault.charbonnier@ensae.fr" }
+]
+requires-python = ">=3.9"
 dependencies = [
     "boto3>=1.42.48",
     "pandas>=3.0.0",
