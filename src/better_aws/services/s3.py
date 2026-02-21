@@ -3,7 +3,6 @@ from pathlib import Path
 from typing import (
     Any,
     Dict,
-    Iterable,
     List,
     Literal,
     Optional,
@@ -13,15 +12,16 @@ from typing import (
     Callable
 )
 from io import BytesIO
-TabularOutput = Literal["pandas", "polars"]
-KeyLike = Union[str, Sequence[str]]
-PathLike = Union[str, Path]
-TabularFileType = Literal["csv", "parquet", "xlsx", "xls"]
 from botocore.exceptions import ClientError
 from .errors import _raise_s3, _err_code
 import json
 import pandas as pd
 import polars as pl
+
+TabularOutput = Literal["pandas", "polars"]
+KeyLike = Union[str, Sequence[str]]
+PathLike = Union[str, Path]
+TabularFileType = Literal["csv", "parquet", "xlsx", "xls"]
 UploadInput = Union[pd.DataFrame, pl.DataFrame, dict, PathLike]
 
 
