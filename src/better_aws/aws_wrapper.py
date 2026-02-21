@@ -1,12 +1,12 @@
+import sys
+import boto3
+import logging
+import botocore.session
+from .services import S3
+from dotenv import dotenv_values
+from botocore.config import Config
 from __future__ import annotations
 from typing import Optional, Any, Dict
-from botocore.config import Config
-import logging
-import boto3
-import botocore.session
-from dotenv import dotenv_values
-from .services import S3
-import sys
 
 
 class AWS:
