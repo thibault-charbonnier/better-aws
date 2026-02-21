@@ -1,6 +1,6 @@
 [project]
 name = "better-aws"
-version = "0.2.0"
+version = "0.3.0"
 description = "Minimal AWS boto3 wrapper"
 readme = "README.md"
 authors = [
