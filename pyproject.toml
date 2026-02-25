@@ -15,3 +15,14 @@ dependencies = [
     "rich>=14.3.2",
     "dotenv>=0.9.9",
 ]
+
+[project.optional-dependencies]
+objects = [
+  "joblib>=1.5.3",
+  "skops>=0.13.0",
+]
+
+[dependency-groups]
+dev = [
+  "better-aws[objects]",
+]

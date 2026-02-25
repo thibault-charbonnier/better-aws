@@ -13,15 +13,19 @@ from typing import (
 )
 from io import BytesIO
 from botocore.exceptions import ClientError
+from .serialization import _serialize_object, _deserialize_object
 from .errors import _raise_s3, _err_code
 import json
 import pandas as pd
 import polars as pl
+import pickle
+
 
 TabularOutput = Literal["pandas", "polars"]
+ObjectFormat = Literal["pickle", "joblib", "skops"]
 KeyLike = Union[str, Sequence[str]]
 PathLike = Union[str, Path]
-TabularFileType = Literal["csv", "parquet", "xlsx", "xls"]
+TabularFileType = Literal["csv", "parquet", "xlsx", "xls", "pkl", "pickle", "joblib", "jl", "skops"]
 UploadInput = Union[pd.DataFrame, pl.DataFrame, dict, PathLike]
 
 
@@ -55,6 +59,10 @@ class S3:
         self.encoding = None
         self.csv_sep = None
         self.csv_index = None
+        self.allow_unsafe_serialization = None
+        self.pickle_protocol = None
+        self.joblib_compress = None
+        self.object_base_format = None
 
     # --------------------------------------------------------
     # |                   Internal Helpers                   |
@@ -210,6 +218,11 @@ class S3:
             else:
                 raise ValueError(f"Unsupported output type for tabular data: {output_tabular}")
 
+        if file_extension in {".pkl", ".pickle", ".joblib", ".jl", ".skops"}:
+            if file_extension in {".pkl", ".pickle", ".joblib", ".jl"} and not self.allow_unsafe_serialization:
+                raise ValueError(f"{file_extension} deserialization is not allowed for security reasons. Enable allow_unsafe_serialization in `config()` to override this behavior.")
+            return lambda raw: _deserialize_object(self, raw, file_extension)
+        
         return lambda raw: raw
 
     def _map_uploader(self,
@@ -280,7 +293,7 @@ class S3:
             final_key = dest_key
             ext = Path(final_key).suffix.lower()
             if ext == "":
-                ext = "." + self.file_type if self.file_type else ".parquet"
+                ext = "." + self.file_type
                 final_key = final_key + ext
 
             if obj.__class__.__module__.startswith("pandas"):
@@ -300,10 +313,14 @@ class S3:
                         else "application/vnd.ms-excel"
                     )
                     data, ct =  bio.getvalue(), ct
+                elif ext in {".pkl", ".pickle", ".joblib", ".jl", ".skops"}:
+                    if not self.allow_unsafe_serialization:
+                        raise ValueError(f"{ext} serialization is not allowed for security reasons. Enable allow_unsafe_serialization in `config()` to override this behavior.")
+                    data, ct = _serialize_object(self, obj, ext)
                 else:
                     raise ValueError(f"Unsupported tabular extension for pandas: {ext}")
-
-            if obj.__class__.__module__.startswith("polars"):
+                
+            elif obj.__class__.__module__.startswith("polars"):
                 if ext == ".csv":
                     s = obj.write_csv()
                     data, ct = s.encode(self.encoding), "text/csv"
@@ -320,6 +337,10 @@ class S3:
                         else "application/vnd.ms-excel"
                     )
                     data, ct = bio.getvalue(), ct
+                elif ext in {".pkl", ".pickle", ".joblib", ".jl", ".skops"}:
+                    if not self.allow_unsafe_serialization:
+                        raise ValueError(f"{ext} serialization is not allowed for security reasons. Enable allow_unsafe_serialization in `config()` to override this behavior.")
+                    data, ct = _serialize_object(self, obj.to_pandas(), ext)
                 else:
                     raise ValueError(f"Unsupported tabular extension for polars: {ext}")
 
@@ -331,19 +352,47 @@ class S3:
 
             return final_key, action
         
+        # Fallback for unknow types
+        final_key = dest_key
+        ext = Path(final_key).suffix.lower()
+        if ext == "":
+            if self.object_base_format == "joblib":
+                ext = ".joblib"
+            elif self.object_base_format == "skops":
+                ext = ".skops"
+            else:
+                ext = ".pkl"
+            final_key = final_key + ext
+
+        if not self.allow_unsafe_serialization:
+            raise ValueError(f"{ext} serialization is not allowed for security reasons. Enable allow_unsafe_serialization in `config()` to override this behavior.")
+        data, ct = _serialize_object(self, obj, ext)
+
+        def action() -> None:
+            if not overwrite and self.exists(final_key, bucket=b):
+                raise ValueError(f"Refusing to overwrite existing object: s3://{b}/{final_key}")
+            s3_client.put_object(Bucket=b, Key=final_key, Body=data, ContentType=ct)
+
+        return final_key, action
+        
     # --------------------------------------------------------
     # |                     Configuration                    |
     # --------------------------------------------------------
 
     def config(self,
                bucket: str = None,
+               *,
                key_prefix: str = "",
                output_type: TabularOutput = "pandas",
                file_type: TabularFileType = "parquet",
                overwrite: bool = True,
                encoding: str = "utf-8",
                csv_sep: str = ",",
-               csv_index: bool = False):
+               csv_index: bool = False,
+               allow_unsafe_serialization: bool = False,
+               object_base_format: ObjectFormat = "pickle",
+               pickle_protocol: int = pickle.HIGHEST_PROTOCOL,
+               joblib_compress: int = 3) -> None:
         """
         Mandatory configuration method to set up S3 parameters.
 
@@ -358,7 +407,7 @@ class S3:
             Supported values: "pandas", "polars".
         file_type: TabularFileType
             Default file type for tabular uploads when the key extension is missing.
-            Supported values: "csv", "parquet", "xlsx", "xls".
+            Supported values: "csv", "parquet", "xlsx", "xls", "pkl", "pickle", "joblib", "jl", "skops".
         overwrite: bool
             Whether to allow overwriting existing objects when uploading.
         encoding: str
@@ -367,6 +416,15 @@ class S3:
             Default separator for CSV files (if output_type is "csv").
         csv_index: bool
             Whether to include the index when uploading pandas DataFrames as CSV (if output_type is "csv").
+        allow_unsafe_serialization: bool
+            Whether to allow unsafe serialization of objects (pickle or alike).
+        object_base_format: ObjectFormat
+            The default serialization format for Python objects when the destination key does not have a recognized tabular extension.
+            Supported values: "pickle", "joblib", "skops".
+        pickle_protocol: int
+            Pickle protocol version to use when serializing with pickle (if allowed).
+        joblib_compress: int
+            Compression level to use when serializing with joblib (if allowed).
         """
         self.bucket = bucket
         self.key_prefix = key_prefix
@@ -376,9 +434,13 @@ class S3:
         self.encoding = encoding
         self.csv_sep = csv_sep
         self.csv_index = csv_index
+        self.allow_unsafe_serialization = allow_unsafe_serialization
+        self.object_base_format = object_base_format
+        self.pickle_protocol = pickle_protocol
+        self.joblib_compress = joblib_compress
 
-        self.aws.info("S3 configured with bucket=%s, key_prefix=%s, output_type=%s, file_type=%s, overwrite=%s",
-                         bucket, key_prefix, output_type, file_type, overwrite)
+        self.aws.info("S3 configured with bucket=%s, key_prefix=%s, output_type=%s, file_type=%s, overwrite=%s, allow_unsafe_serialization=%s",
+                      bucket, key_prefix, output_type, file_type, overwrite, allow_unsafe_serialization)
 
     # --------------------------------------------------------
     # |                    External API                      |
