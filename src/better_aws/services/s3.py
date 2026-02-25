@@ -19,7 +19,9 @@ import json
 import pandas as pd
 import polars as pl
 import pickle
-
+from rich.console import Console
+from .tree import _build_tree_from_objects, _compute_folder_sizes, _render_tree
+from.pattern import _glob_base_dir, _glob_to_regex, _has_glob, _norm_ext_set
 
 TabularOutput = Literal["pandas", "polars"]
 ObjectFormat = Literal["pickle", "joblib", "skops"]
@@ -507,6 +509,57 @@ class S3:
             return out
         except ClientError as e:
             _raise_s3(e, bucket=b)
+    
+    def tree(self,
+             prefix: str = "",
+             *,
+             bucket: Optional[str] = None,
+             show_full_path: bool = True,
+             max_depth: Optional[int] = None,
+             max_children: Optional[int] = None,
+             folders_first: bool = True,
+             limit: Optional[int] = None) -> None:
+        """
+        Pretty-print an S3 prefix as a tree, sorting folders/files by total size at each level.
+
+        Parameters
+        ----------
+        prefix: optional str
+            Filter objects by prefix.
+        bucket: optional str
+            Override default bucket from config.
+        show_full_path: bool
+            If True, show the full S3 key for each node. If False, show only the basename.
+        max_depth: Optional[int]
+            Maximum depth to display in the tree. If None, there is no limit.
+        max_children: Optional[int]
+            Maximum number of children to display for each node. If None, there is no limit.
+        folders_first: bool
+            If True, display folders before files at each level. If False, sort purely by size and name.
+        limit: Optional[int]
+            Maximum number of objects to consider when building the tree. If None, there is no limit.
+        """
+        objs = self.list(
+            prefix=prefix,
+            bucket=bucket,
+            limit=limit,
+            recursive=True,
+            with_meta=True,
+        )
+
+        root_label = self._resolve_key(prefix) or "/"
+        root = _build_tree_from_objects(objs, root_label=root_label)
+        _compute_folder_sizes(root)
+
+        rich_tree = _render_tree(
+            root,
+            show_full_path=show_full_path,
+            max_depth=max_depth,
+            max_children=max_children,
+            folders_first=folders_first,
+        )
+
+        Console().print(rich_tree)
 
     def exists(self, key: str, *, bucket: Optional[str] = None) -> bool:
         """
@@ -539,32 +592,69 @@ class S3:
                 return False
             _raise_s3(e, bucket=b, key=k)
     
-    def delete(self, key: KeyLike, *, bucket: Optional[str] = None) -> None:
+    def delete(self, 
+               key: KeyLike,
+               *,
+               force: bool = False,
+               bucket: Optional[str] = None) -> None:
         """
         Delete one or more keys from the S3 bucket.
+
+        Key can be :
+            - A single key (str)
+            - A list of keys (List[str])
+            - A pattern with glob syntax (as "folder/*") to delete all matching keys. Use with force=True.
 
         Parameters:
         -----------
         key: str or list of str
             The object key(s) to delete.
+        force: bool
+            Allow deleting of a tree of objects by pattern (as "folder/*").
+            Use with caution as this will delete all matching objects.
         bucket: optional str
             Override default bucket from config.
         """
         b = self._bucket(bucket)
-        keys = self._normalize_keys(key)
         s3 = self._client()
+
+        raw_keys: List[str] = list(key) if isinstance(key, (list, tuple)) else [key]
+        raw_keys = [self._resolve_key(str(k)) for k in raw_keys]
+
+        expanded: List[str] = []
+        for k in raw_keys:
+            if not _has_glob(k):
+                expanded.append(k)
+                continue
+
+            if not force:
+                raise ValueError(
+                    "Refusing to delete by pattern without force=True. "
+                    "Example: s3.delete('research/*', force=True)"
+                )
+
+            base_dir = _glob_base_dir(k)
+            rx = _glob_to_regex(k)
+            candidates = self.list(prefix=base_dir, bucket=b, recursive=True, with_meta=False)  # type: ignore
+            expanded.extend([kk for kk in candidates if rx.match(kk)])
+
+        expanded = sorted(set(expanded))
+        if not expanded:
+            self.aws.info("No objects matched for deletion.")
+            return
+
         try:
-            if len(keys) == 1:
-                s3.delete_object(Bucket=b, Key=keys[0])
-                self.aws.info("Deleted s3://%s/%s", b, keys[0])
+            if len(expanded) == 1:
+                s3.delete_object(Bucket=b, Key=expanded[0])
+                self.aws.info("Deleted s3://%s/%s", b, expanded[0])
             else:
-                for i in range(0, len(keys), 1000):
-                    chunk = keys[i: i + 1000]
+                for i in range(0, len(expanded), 1000):
+                    chunk = expanded[i: i + 1000]
                     s3.delete_objects(
                         Bucket=b,
-                        Delete={"Objects": [{"Key": k} for k in chunk], "Quiet": True},
+                        Delete={"Objects": [{"Key": kk} for kk in chunk], "Quiet": True},
                     )
-                    self.aws.info("Deleted s3://%s/%s (batch %d)", b, chunk, i // 1000 + 1)
+                    self.aws.info("Deleted s3://%s/... (batch %d, %d keys)", b, i // 1000 + 1, len(chunk))
         except ClientError as e:
             _raise_s3(e, bucket=b)
     
@@ -572,6 +662,9 @@ class S3:
                  key: KeyLike,
                  to: PathLike = None,
                  *,
+                 include_extensions: Optional[Sequence[str]] = None,
+                 exclude_extensions: Optional[Sequence[str]] = None,
+                 preserve_prefix: bool = False,
                  bucket: Optional[str] = None) -> Union[Path, List[Path]]:
         """
         Download one or more keys from S3 to a local path.
@@ -583,6 +676,16 @@ class S3:
         to: str or Path
             Local file path or directory to download to.
             If downloading multiple keys, this should be a directory.
+        include_extensions: optional list of str
+            If provided, only download objects with these file extensions (e.g., [".csv", ".json"]).
+        exclude_extensions: optional list of str
+            If provided, skip downloading objects with these file extensions (e.g., [".tmp", ".log"]).
+        preserve_prefix: bool
+            If True, preserve the S3 key prefix structure in the local download path.
+            If False, flatten all files to the destination directory.
+            Ex: 
+                - key="data/2023/*.csv", to="downloads/", preserve_prefix=True -> downloads/data/2023/file.csv
+                - key="data/2023/*.csv", to="downloads/", preserve_prefix=False -> downloads/file.csv
         bucket: optional str
             Override default bucket from config.
 
@@ -591,42 +694,74 @@ class S3:
             The local path(s) where the object(s) were downloaded.
         """
         b = self._bucket(bucket)
-        keys = self._normalize_keys(key)
         s3 = self._client()
 
-        if to is None:
-            dest_base = Path(".")
-        else:
-            dest_base = Path(to)
+        raw_keys: List[str] = list(key) if isinstance(key, (list, tuple)) else [key]
+        raw_keys = [self._resolve_key(str(k)) for k in raw_keys]
 
-        multi = len(keys) > 1
-        if multi and dest_base.suffix:
-            raise ValueError("When downloading multiple keys, `to` must be a directory path (not a file).")
+        inc = _norm_ext_set(include_extensions)
+        exc = _norm_ext_set(exclude_extensions)
 
-        out: List[Path] = []
-        for k in keys:
+        def keep_ext(k: str) -> bool:
+            ext = Path(k).suffix.lower()
+            if inc is not None and ext not in inc:
+                return False
+            if exc is not None and ext in exc:
+                return False
+            return True
 
-            if to is None:
-                path = Path(Path(k).name)
-            else:
-                is_dir_semantics = dest_base.is_dir() or str(dest_base).endswith(("/", "\\"))
-                if multi or is_dir_semantics:
-                    path = dest_base / Path(k).name
-                else:
-                    path = dest_base
+        expanded: List[Tuple[str, str]] = []
 
-            path.parent.mkdir(parents=True, exist_ok=True)
-
-            if path.exists() and not self.overwrite:
-                out.append(path)
+        for k in raw_keys:
+            if not _has_glob(k):
+                if keep_ext(k):
+                    expanded.append((k, ""))
                 continue
 
+            base_dir = _glob_base_dir(k)
+            rx = _glob_to_regex(k)
+            candidates = self.list(prefix=base_dir, bucket=b, recursive=True, with_meta=False)  # type: ignore
+
+            for kk in candidates:
+                if rx.match(kk) and keep_ext(kk):
+                    expanded.append((kk, base_dir))
+
+        expanded = sorted(set(expanded))
+        keys_final = [k for (k, _) in expanded]
+
+        if not keys_final:
+            self.aws.info("No objects matched for download.")
+            return []
+
+        dest_base = Path(".") if to is None else Path(to)
+        multi = len(keys_final) > 1 or any(_has_glob(k) for k in raw_keys)
+
+        if multi and dest_base.suffix and not str(dest_base).endswith(("/", "\\")):
+            raise ValueError("When downloading multiple keys (or patterns), `to` must be a directory path.")
+
+        out: List[Path] = []
+        for s3_key, strip_base in expanded:
+            rel = s3_key
+            if not preserve_prefix and strip_base and s3_key.startswith(strip_base):
+                rel = s3_key[len(strip_base):].lstrip("/")
+
+            if multi or dest_base.is_dir() or str(dest_base).endswith(("/", "\\")):
+                local_path = dest_base / rel
+            else:
+                local_path = dest_base
+
+            local_path.parent.mkdir(parents=True, exist_ok=True)
+
             try:
-                s3.download_file(b, k, str(path))
-                out.append(path)
-                self.aws.info("Downloaded s3://%s/%s to %s", b, k, path)
+                if local_path.exists() and not self.overwrite:
+                    out.append(local_path)
+                    continue
+
+                s3.download_file(b, s3_key, str(local_path))
+                out.append(local_path)
+                self.aws.info("Downloaded s3://%s/%s to %s", b, s3_key, local_path)
             except ClientError as e:
-                _raise_s3(e, bucket=b, key=k)
+                self.aws.error("Failed downloading s3://%s/%s -> %s (%s)", b, s3_key, local_path, e)
 
         return out[0] if len(out) == 1 else out
     
