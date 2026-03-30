@@ -3,7 +3,7 @@ import sys
 import boto3
 import logging
 import botocore.session
-from .services import S3
+from .services.s3 import S3
 from dotenv import dotenv_values
 from botocore.config import Config
 from typing import Optional, Any, Dict
@@ -16,9 +16,9 @@ class AWS:
                  region: Optional[str] = None,
                  logger: Optional[logging.Logger] = None,
                  verbose: bool = False,
-                 retries: int = 10,
-                 connect_timeout_s: int = 5,
-                 read_timeout_s: int = 60,
+                 retries: int = 3,
+                 connect_timeout_s: int = 10,
+                 read_timeout_s: int = 300,
                  *,
                  credentials_file: Optional[str] = None,
                  config_file: Optional[str] = None,
@@ -185,6 +185,9 @@ class AWS:
             retries={"max_attempts": self.retries, "mode": "standard"},
             connect_timeout=self.connect_timeout_s,
             read_timeout=self.read_timeout_s,
+            request_checksum_calculation="when_required",
+            response_checksum_validation="when_required",
+            tcp_keepalive=True,
         )
 
     # --------------------------------------------------------

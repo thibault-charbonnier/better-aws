@@ -1,6 +1,5 @@
-from __future__ import annotations
-from typing import Optional
 from botocore.exceptions import ClientError
+from typing import Optional
 
 class BetterAWSError(RuntimeError): ...
 class S3Error(BetterAWSError): ...
@@ -11,7 +10,6 @@ class MissingOptionalDependency(S3Error): ...
 
 def _err_code(e: ClientError) -> str:
     return e.response.get("Error", {}).get("Code", "Unknown")
-
 
 def _raise_s3(e: ClientError, *, bucket: str, key: Optional[str] = None) -> None:
     code = _err_code(e)
